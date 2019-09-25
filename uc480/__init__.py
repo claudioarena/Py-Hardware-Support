@@ -83,6 +83,8 @@ class uc480:
         self._camID = None
         self._swidth = 0
         self._sheight = 0
+        self._aoiwidth = 0
+        self._aoiheight = 0
         self._rgb = 0
 
         self._image = None
@@ -196,6 +198,42 @@ class uc480:
                 print("Camera #%d: SerNo = %s, CameraID = %d, DeviceID = %d" % (i, camera.SerNo, camera.dwCameraID, camera.dwDeviceID))
 
 
+    # query number of connected cameras and get back the CameraID of the camera with the Serial Number provided (if any)
+    def get_cameras_id_by_SerNo(self, SerNo, return_useDevId=False):
+        """Queries camera connected, and see if there is one with the Serial Number provided
+        Serial Number should be provided as a string.
+        """
+        nCams = ctypes.c_int()
+        self.call("is_GetNumberOfCameras", ptr(nCams))
+        nCams = nCams.value
+
+        if nCams > 0:
+            self._cam_list = create_camera_list(nCams)
+            self.call("is_GetCameraList", ptr(self._cam_list))
+
+            for i in range(self._cam_list.dwCount):
+                camera = self._cam_list.uci[i]
+                if camera.SerNo.decode('ascii') == SerNo:
+                    print("Found camera with given Serial Number! CameraId = %d DeviceID = %d" % (camera.dwCameraID,
+                                                                                                  camera.dwDeviceID))
+                    if return_useDevId:
+                        return camera.dwDeviceID
+                    return camera.dwCameraID
+
+        print("No cameras found!")
+        return 0
+
+
+    # connect to camera with given Serial Number; If Serial Number is not found, connect to first available camera
+    def connect_with_SerNo(self, SerNo):
+        """Connect to the camera with the given Serial Number. If Serial Number is not found, connect to first available camera.
+         When connected, sensor information is read out, image memory is reserved and some default parameters are submitted.
+        Serial Number should be provided as a string.
+        """
+        dwCameraID = self.get_cameras_id_by_SerNo(SerNo, return_useDevId=False)
+        self.connect(ID=dwCameraID, useDevID=False)
+
+
     # connect to camera with given cameraID; if cameraID = 0, connect to first available camera
     def connect(self, ID=0, useDevID=False):
         """Connect to the camera with the given cameraID. If cameraID is 0, connect to the first available camera. When connected, sensor information is read out, image memory is reserved and some default parameters are submitted.
@@ -216,6 +254,11 @@ class uc480:
         self.call("is_GetSensorInfo", self._camID, ptr(pInfo))
         self._swidth = pInfo.nMaxWidth
         self._sheight = pInfo.nMaxHeight
+        pParam = IS_SIZE_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_SIZE, ptr(pParam), ctypes.sizeof(pParam))
+        self._aoiwidth = pParam.s32Width
+        self._aoiheight = pParam.s32Height
+
         self._rgb = not (pInfo.nColorMode == IS_COLORMODE_MONOCHROME)
         if self._rgb:
             self.call("is_SetColorMode", self._camID, IS_CM_RGB8_PACKED)
@@ -247,6 +290,8 @@ class uc480:
         """Disconnect a currently connected camera.
         """
         self.call("is_ExitCamera", self._camID)
+        self._image = None
+        self._imgID = None
 
 
     def stop(self):
@@ -266,6 +311,79 @@ class uc480:
         .. versionadded:: 01-07-2016
         """
         return self._swith, self._sheight
+
+
+    # set pixel_clock
+    #WARNING:The use of the following functions will affect the frame rate:
+    # set_clock(), set_AOI_size()
+    # So call this again if you use the above functions
+    def set_framerate(self, FPS):
+        """Set the Framerate.
+
+        :param int Framerate: New Framerate setting.
+        """
+        min_FPS, max_FPS, _ = self.get_framerate_limits()
+        FPS = max(min_FPS, min(float(FPS), max_FPS))
+
+        pParam = ctypes.c_double(FPS)
+        result = ctypes.c_double()
+        self.call("is_SetFrameRate", self._camID, pParam, ptr(result))
+        # Suggested to be called after is_SetFrameRate
+        pParam = ctypes.c_double()
+        self.call("is_Exposure", self._camID, IS_EXPOSURE_CMD_GET_EXPOSURE, ptr(pParam), ctypes.sizeof(pParam))
+        # Following also seems to help
+        self.acquire()
+
+        return result.value
+
+
+    def get_framerate(self):
+        """Get the Framerate.
+        """
+        pParam = ctypes.c_double()
+        self.call("is_GetFramesPerSecond", self._camID, ptr(pParam))
+        return pParam.value
+
+
+    def get_framerate_limits(self):
+        """Returns Framerate limits (*min, max, 1/framerate interval (i.e. time resolution in seconds) ).
+        """
+        pParam1 = ctypes.c_double()
+        pParam2 = ctypes.c_double()
+        pParam3 = ctypes.c_double()
+        self.call("is_GetFrameTimeRange", self._camID, ptr(pParam1), ptr(pParam2), ptr(pParam3))
+        return 1/pParam2.value, 1/pParam1.value, pParam3.value
+
+
+    # set pixel_clock
+    def set_clock(self, clock):
+        """Set the hardware pixel clock.
+
+        :param int clock: New pixel clock setting.
+        """
+        min_clock, max_clock, _ = self.get_clock_limits()
+        clock = max(min_clock, min(int(clock), max_clock))
+
+        pParam = ctypes.c_uint(clock)
+        self.call("is_PixelClock", self._camID, IS_PIXELCLOCK_CMD_SET, ptr(pParam), ctypes.sizeof(pParam))
+
+
+    def get_clock(self):
+        """Get the hardware pixel clock.
+        """
+
+        pParam = ctypes.c_uint()
+        self.call("is_PixelClock", self._camID, IS_PIXELCLOCK_CMD_GET, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.value
+
+
+    def get_clock_limits(self):
+        """Returns clock limits (*min, max, increment*).
+        """
+        dblRange = (ctypes.c_uint * 3)()
+        self.call("is_PixelClock", self._camID, IS_PIXELCLOCK_CMD_GET_RANGE, ptr(dblRange), ctypes.sizeof(dblRange))
+        minClock, maxClock, intClok = dblRange
+        return minClock, maxClock, intClok
 
 
     # set hardware gain (0..100)
@@ -301,6 +419,132 @@ class uc480:
             self.call("is_SetGainBoost", self._camID, IS_SET_GAINBOOST_OFF)
 
 
+    # returns AOI size minimum increment.
+    def get_AOI_size_inc(self):
+        """returns AOI size minimum increment.
+        """
+        pParam = IS_SIZE_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_SIZE_INC, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32Width, pParam.s32Height
+
+
+    # returns AOI max size
+    def get_AOI_max_size(self):
+        """returns AOI max size.
+        """
+        pParam = IS_SIZE_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_SIZE_MAX, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32Width, pParam.s32Height
+
+
+    # returns AOI min size
+    def get_AOI_min_size(self):
+        """returns AOI min size.
+        """
+        pParam = IS_SIZE_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_SIZE_MIN, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32Width, pParam.s32Height
+
+
+    # returns AOI size
+    def get_AOI_size(self):
+        """returns AOI size.
+        """
+        pParam = IS_SIZE_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_SIZE, ptr(pParam), ctypes.sizeof(pParam))
+        self._aoiwidth = pParam.s32Width
+        self._aoiheight = pParam.s32Height
+        return self._aoiwidth, self._aoiheight
+
+
+    # sets AOI size. This rounds the given parameters to the closest allowed values
+    def set_AOI_size(self, width, height):
+        """sets AOI size.
+        """
+        # Width and Height must be bigger than the minimum settable amount, and a multiple of the allowed increments
+        minWidth, minHeight = self.get_AOI_min_size()
+        maxWidth, maxHeight = self.get_AOI_max_size()
+        incWidth, incHeight = self.get_AOI_size_inc()
+
+        width = round(width / incWidth) * incWidth if (width % incWidth) is not 0 else width
+        height = round(height / incHeight) * incHeight if (height % incHeight) is not 0 else height
+        width = minWidth if width < minWidth else width
+        height = minHeight if height < minHeight else height
+        width = maxWidth if width > maxWidth else width
+        height = maxHeight if height > maxHeight else height
+        self._aoiwidth = width
+        self._aoiheight = height
+
+        pParam = IS_SIZE_2D(self._aoiwidth, self._aoiheight)
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_SET_SIZE, ptr(pParam), ctypes.sizeof(pParam))
+
+        _image = None
+        self.create_buffer()
+
+
+    # returns AOI position
+    def get_AOI_max_position(self):
+        """returns max AOI position.
+        """
+        pParam = IS_POINT_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_POS_MAX, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32X, pParam.s32Y
+
+
+    # returns AOI position
+    def get_AOI_min_position(self):
+        """returns min AOI position.
+        """
+        pParam = IS_POINT_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_POS_MIN, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32X, pParam.s32Y
+
+
+    # returns AOI position
+    def get_AOI_position(self):
+        """returns AOI position.
+        """
+        pParam = IS_POINT_2D()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_GET_POS, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.s32X, pParam.s32Y
+
+
+    # sets AOI position.
+    def set_AOI_position(self, x, y):
+        """sets AOI position.
+        """
+        pParam = IS_POINT_2D(x, y)
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_SET_POS, ptr(pParam), ctypes.sizeof(pParam))
+
+
+    # returns if AOI fast position is possible.
+    def get_AOI_fast_position_possible(self):
+        """returns if AOI fast position is possible.
+        """
+        pParam = ctypes.c_uint()
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_SET_POS_FAST_SUPPORTED, ptr(pParam), ctypes.sizeof(pParam))
+        return pParam.value
+
+
+    # sets AOI position in a fast way (check if supported first!).
+    def set_AOI_position_fast(self, x, y):
+        """ sets AOI position in a fast way (check if supported first!).
+        """
+        pParam = IS_POINT_2D(x, y)
+
+        self.call("is_HotPixel", self._camID, IS_HOTPIXEL_DISABLE_CORRECTION)
+        self.call("is_AOI", self._camID, IS_AOI_IMAGE_SET_POS_FAST, ptr(pParam), ctypes.sizeof(pParam))
+
+
+    # reset the AOI to the whole sensor size.
+    def reset_AOI(self):
+        """ reset the AOI to the whole sensor size.
+        """
+        self.set_AOI_position(0, 0)
+        maxWidth, maxHeight = self.get_AOI_max_size()
+        self.set_AOI_size(maxWidth, maxHeight)
+
+
     # set blacklevel compensation
     def set_blacklevel(self, blck):
         """Set blacklevel compensation on or off.
@@ -315,6 +559,9 @@ class uc480:
         """
         pParam = ctypes.c_double(exp)
         self.call("is_Exposure", self._camID, IS_EXPOSURE_CMD_SET_EXPOSURE, ptr(pParam), ctypes.sizeof(pParam))
+        # First image after this seems to have wrong exposure.
+        # So acquire it here instead
+        self.acquire()
 
 
     # returns exposure time in ms
@@ -329,6 +576,10 @@ class uc480:
     def get_exposure_limits(self):
         """Returns the supported limits for the exposure time (*min, max, increment*).
         """
+        dblRange = (ctypes.c_double * 3)()
+        self.call("is_Exposure", self._camID, IS_EXPOSURE_CMD_GET_EXPOSURE_RANGE, ptr(dblRange), ctypes.sizeof(dblRange))
+        self.expmin, self.expmax, self.expinc = dblRange
+
         return self.expmin, self.expmax, self.expinc
 
 
@@ -343,7 +594,7 @@ class uc480:
             self.call("is_FreeImageMem", self._camID, self._image, self._imgID)
         self._image = ctypes.c_char_p()
         self._imgID = ctypes.c_int()
-        self.call("is_AllocImageMem", self._camID, self._swidth, self._sheight, self._bitsperpixel, ptr(self._image), ptr(self._imgID))
+        self.call("is_AllocImageMem", self._camID, self._aoiwidth, self._aoiheight, self._bitsperpixel, ptr(self._image), ptr(self._imgID))
         self.call("is_SetImageMem", self._camID, self._image, self._imgID)
 
 
@@ -355,9 +606,9 @@ class uc480:
         """
         # create usable numpy array for frame data
         if(self._bitsperpixel == 8):
-            _framedata = np.zeros((self._sheight, self._swidth), dtype=np.uint8)
+            _framedata = np.zeros((self._aoiheight, self._aoiwidth), dtype=np.uint8)
         else:
-            _framedata = np.zeros((self._sheight, self._swidth, 3), dtype=np.uint8)
+            _framedata = np.zeros((self._aoiheight, self._aoiwidth, 3), dtype=np.uint8)
 
         self.call("is_CopyImageMem", self._camID, self._image, self._imgID, _framedata.ctypes.data_as(ctypes.c_char_p))
         return _framedata
