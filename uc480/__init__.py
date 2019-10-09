@@ -85,6 +85,7 @@ class uc480:
         self._sheight = 0
         self._aoiwidth = 0
         self._aoiheight = 0
+        self._hotPixelCorrectionOff = 0
         self._rgb = 0
 
         self._image = None
@@ -526,13 +527,20 @@ class uc480:
         return pParam.value
 
 
+    def disable_hotPixelCorrection(self):
+        self._hotPixelCorrectionOff = 1
+        self.call("is_HotPixel", self._camID, IS_HOTPIXEL_DISABLE_CORRECTION)
+
+
     # sets AOI position in a fast way (check if supported first!).
+    # For this to work, hot pixel correction should be disabled!
     def set_AOI_position_fast(self, x, y):
         """ sets AOI position in a fast way (check if supported first!).
         """
         pParam = IS_POINT_2D(x, y)
+        if self._hotPixelCorrectionOff is 0:
+            self.disable_hotPixelCorrection()
 
-        self.call("is_HotPixel", self._camID, IS_HOTPIXEL_DISABLE_CORRECTION)
         self.call("is_AOI", self._camID, IS_AOI_IMAGE_SET_POS_FAST, ptr(pParam), ctypes.sizeof(pParam))
 
 
